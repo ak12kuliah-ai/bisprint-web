@@ -12,7 +12,8 @@ export default function Home() {
   const [file, setFile] = useState(null);
   const [ikonFile, setIkonFile] = useState("fas fa-file-alt text-blue-500");
   const [isLoading, setIsLoading] = useState(false);
-  const [dragOver, setDragOver] = useState(false); // hanya untuk efek visual
+  const [loadingText, setLoadingText] = useState("Memproses Dokumen..."); // Tambahan untuk info proses
+  const [dragOver, setDragOver] = useState(false); 
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
@@ -61,6 +62,44 @@ export default function Home() {
     if(fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  // --- FUNGSI LOAD LIBRARY PDF.JS DINAMIS ---
+  const loadPdfJs = () => {
+    return new Promise((resolve, reject) => {
+      if (window['pdfjs-dist/build/pdf']) {
+        return resolve(window['pdfjs-dist/build/pdf']);
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js';
+      script.onload = () => resolve(window['pdfjs-dist/build/pdf']);
+      script.onerror = () => reject(new Error('Gagal memuat library PDF'));
+      document.head.appendChild(script);
+    });
+  };
+
+  // --- FUNGSI DETEKSI WARNA (PIXEL) ---
+  const detectColor = (ctx, width, height) => {
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+      
+      let colorPixels = 0;
+      const totalPixels = width * height;
+
+      for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i+1];
+          const b = data[i+2];
+          
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          
+          if (max - min > 20) {
+              colorPixels++;
+          }
+      }
+      return (colorPixels / totalPixels) * 100 > 0.3; 
+  };
+
+  // --- FUNGSI SUBMIT UTAMA ---
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!file) return;
@@ -68,8 +107,49 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-        const fileExt = file.name.split('.').pop();
-        const fileNameUnik = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
+        const ext = file.name.split('.').pop().toLowerCase();
+        let totalBW = 0;
+        let totalWarna = 0;
+
+        // 1. PROSES ANALISIS JIKA FILE ADALAH PDF
+        if (ext === 'pdf') {
+            setLoadingText("Memuat mesin AI Pengecek Warna...");
+            const pdfjsLib = await loadPdfJs();
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+            const totalPages = pdf.numPages;
+
+            // Buat canvas virtual di memori (tidak tampil di layar)
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            for (let i = 1; i <= totalPages; i++) {
+                setLoadingText(`Menganalisis Halaman ${i} dari ${totalPages}...`);
+                const page = await pdf.getPage(i);
+                
+                // Gunakan skala 0.3 agar proses cepat seperti di PHP sebelumnya
+                const viewport = page.getViewport({ scale: 0.3 });
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+                const isColor = detectColor(ctx, canvas.width, canvas.height);
+                if (isColor) totalWarna++;
+                else totalBW++;
+            }
+        } else {
+            // Jika bukan PDF (misal JPG/DOC), set default nilai (karena butuh diproses server/kasir admin)
+            setLoadingText("Memproses Lampiran...");
+            totalWarna = 1; 
+            totalBW = 0;
+        }
+
+        // 2. PROSES UNGGAH KE SUPABASE
+        setLoadingText("Mengunggah File ke Database Server...");
+        const fileNameUnik = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${ext}`;
 
         const { error } = await supabase.storage
             .from('dokumen_pesanan')
@@ -81,18 +161,19 @@ export default function Home() {
             .from('dokumen_pesanan')
             .getPublicUrl(fileNameUnik);
 
+        // 3. SIMPAN DATA ASLI KE LOCALSTORAGE
         const pesananData = {
             fileName: file.name,
             fileUrl: urlData.publicUrl,
-            halBW: 5,
-            halWarna: 2
+            halBW: totalBW,         // <--- Tepat dari hasil Hitung PDF
+            halWarna: totalWarna    // <--- Tepat dari hasil Hitung PDF
         };
         localStorage.setItem('pesananBisprint', JSON.stringify(pesananData));
 
         router.push('/preview');
 
     } catch (error) {
-        Swal.fire('Gagal Mengunggah', error.message, 'error');
+        Swal.fire('Gagal Memproses', error.message, 'error');
         setIsLoading(false);
     }
   };
@@ -162,9 +243,11 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
-                <button type="button" onClick={(e) => { e.stopPropagation(); resetFile(); }} className="text-red-500 hover:text-red-700 transition-transform hover:scale-110">
-                  <i className="fas fa-times text-xl"></i>
-                </button>
+                {!isLoading && (
+                    <button type="button" onClick={(e) => { e.stopPropagation(); resetFile(); }} className="text-red-500 hover:text-red-700 transition-transform hover:scale-110">
+                    <i className="fas fa-times text-xl"></i>
+                    </button>
+                )}
               </div>
             )}
 
@@ -172,7 +255,7 @@ export default function Home() {
               <button type="submit" disabled={isLoading} 
                 className="w-full mt-6 py-3.5 bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-bold rounded-xl hover:from-blue-700 hover:to-indigo-800 transition-all duration-300 flex justify-center items-center disabled:opacity-75 shadow-lg hover:shadow-2xl hover:scale-[1.02] active:scale-95">
                 {isLoading ? (
-                  <><i className="fas fa-spinner fa-spin mr-2"></i> Mengunggah Dokumen...</>
+                  <><i className="fas fa-spinner fa-spin mr-2"></i> {loadingText}</>
                 ) : (
                   <><span>Lanjut Pengaturan Pesanan</span> <i className="fas fa-arrow-right ml-2 group-hover:translate-x-1 transition-transform"></i></>
                 )}
